@@ -1,0 +1,25 @@
+# config.yaml
+pipeline:
+  # Input for the Python pipeline
+  input_log_file: "logs/input/trace.log"
+  # Output of the Python pipeline, Input for the C++ executor
+  generator_log_file: "logs/output/test1/synthetic_trace.log"
+  debug_model_output_file: "logs/output/characterization_model.json"
+
+
+components:
+  parser:
+    type: "redis"
+    timestamp_granularity: 5
+
+  generator:
+    type: "heatmap"
+    percentage_interval: 1
+    simulation_duration_s: 222
+    time_expansion_strategy: "stretch"  # Can be either cyclic or stretch
+
+  executor:
+    type: "redis"
+    host: "127.0.0.1"
+    port: 6379
+    max_workers: 10
