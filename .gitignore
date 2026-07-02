@@ -2,3 +2,7 @@ __pycache__
 .vscode
 logs/*
 !logs/.gitkeep
+*.sh
+Dockerfile
+ycsb_results
+.dockerignore

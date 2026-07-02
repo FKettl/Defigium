@@ -3,6 +3,7 @@
 #include <vector>
 #include <iterator>
 #include <iostream>
+#include <sstream>
 #include <yaml-cpp/yaml.h>
 
 RedisExecutorStrategy::RedisExecutorStrategy() = default;
@@ -20,13 +21,18 @@ void RedisExecutorStrategy::connect(const YAML::Node& config) {
 
     connection_options.connect_timeout = std::chrono::seconds(1);
 
-    std::cout << "Connecting to Redis at: tcp://" << host << ":" << port
+	std::stringstream ss;
+    ss << "Connecting to Redis at: tcp://" << host << ":" << port
               << " with 1s timeout" << std::endl;
-
+	std::cout << ss.str();
     m_redis_client = std::make_unique<sw::redis::Redis>(connection_options);
 }
 
 ExecutionResult RedisExecutorStrategy::execute(const Command& command) {
+	std::chrono::steady_clock::time_point start_time, end_time;
+	bool timing_started = false;
+	
+
     try {
         const auto& args_map = command.additional_data;
         const auto it = args_map.find("raw_args");
@@ -38,28 +44,54 @@ ExecutionResult RedisExecutorStrategy::execute(const Command& command) {
                 for (size_t i = 0; i < raw_args.size(); i += 2) {
                     field_values.emplace_back(raw_args[i], raw_args[i + 1]);
                 }
+				start_time = std::chrono::steady_clock::now();
+				timing_started = true;
                 m_redis_client->hmset(command.target, field_values.begin(), field_values.end());
+				end_time = std::chrono::steady_clock::now();
+
             }
         } else if (command.op_type == "SET") {
             if (!raw_args.empty()) {
+				start_time = std::chrono::steady_clock::now();
+				timing_started = true;
                 m_redis_client->set(command.target, raw_args[0]);
+				end_time = std::chrono::steady_clock::now();
             }
         } else if (command.op_type == "GET") {
+			start_time = std::chrono::steady_clock::now();
+			timing_started = true;
             m_redis_client->get(command.target);
+			end_time = std::chrono::steady_clock::now();
         } else if (command.op_type == "HGETALL") {
             std::vector<std::pair<std::string, std::string>> result;
+			start_time = std::chrono::steady_clock::now();
+			timing_started = true;
             m_redis_client->hgetall(command.target, std::back_inserter(result));
+			end_time = std::chrono::steady_clock::now();
         } else if (command.op_type == "DEL") {
+			start_time = std::chrono::steady_clock::now();
+			timing_started = true;
             m_redis_client->del(command.target);
+			end_time = std::chrono::steady_clock::now();
         } else if (command.op_type == "ZADD") {
             if (raw_args.size() >= 2) {
+				start_time = std::chrono::steady_clock::now();
+				timing_started = true;
                 m_redis_client->zadd(command.target, raw_args[1], std::stod(raw_args[0]));
+				end_time = std::chrono::steady_clock::now();
             }
         }
         // For more commands, add additional else-if blocks here.
-        return {0, true};
+		long long latency_ns = 0;
+		if (timing_started) {
+			auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
+			latency_ns = elapsed.count();
+		}
+        return {latency_ns, true};
     } catch (const std::exception& e) {
-        std::cerr << "ERRO ao executar comando [" << command.op_type << "] no alvo [" << command.target << "]: " << e.what() << std::endl;
+        std::stringstream ss;
+		ss << "ERRO ao executar comando [" << command.op_type << "] no alvo [" << command.target << "]: " << e.what() << std::endl;
+		std::cerr << ss.str();
         return {0, false};
     }
 }
@@ -98,7 +130,7 @@ std::vector<std::string> RedisExecutorStrategy::parse_command_args(const std::st
 
 
 std::optional<Task> RedisExecutorStrategy::parse_line(const std::string& log_line) {
-    static const std::regex line_splitter_regex(R"(^(\S+)\s+\[([^\]]+)\]\s+(.*)$)");
+    static const std::regex line_splitter_regex(R"(^(\S+)\s+\[([^\]]+)\]\s+(.*)\s*$)");
 
     std::smatch line_parts;
     if (!std::regex_match(log_line, line_parts, line_splitter_regex)) {

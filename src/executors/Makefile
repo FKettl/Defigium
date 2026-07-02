@@ -13,7 +13,7 @@ LIBS_BASE = -lpthread -lyaml-cpp
 TARGET = executor
 
 # Base files
-STATIC_SOURCES = main.cpp factory.cpp
+STATIC_SOURCES = main.cpp factory.cpp ThreadPool.cpp
 
 OBJECTS = $(SOURCES:.cpp=.o)
 

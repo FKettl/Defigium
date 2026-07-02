@@ -1,4 +1,5 @@
 #include "factory.h"
+#include "ThreadPool.h"
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -11,73 +12,10 @@
 #include <yaml-cpp/yaml.h>
 #include <atomic>
 
-struct Task_Worker {
-    std::chrono::steady_clock::time_point target_time;
-    Command command;
-};
-
-template <typename T>
-class ThreadSafeQueue {
-public:
-    void push(T value) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_queue.push(std::move(value));
-        m_cond.notify_one();
-    }
-    T pop() {
-        std::unique_lock<std::mutex> lock(m_mutex);
-        m_cond.wait(lock, [this]{ return !m_queue.empty(); });
-        T value = std::move(m_queue.front());
-        m_queue.pop();
-        return value;
-    }
-private:
-    std::queue<T> m_queue;
-    std::mutex m_mutex;
-    std::condition_variable m_cond;
-};
-
-void worker_function(
-    int id,
-    const YAML::Node& executor_config,
-    ThreadSafeQueue<Task_Worker>& queue,
-    std::atomic<long long>& success_count,
-    std::atomic<long long>& error_count
-) {
-    std::unique_ptr<IExecutorStrategy> executor = nullptr;
-
-    try {
-        executor = ExecutorFactory::create(executor_config["type"].as<std::string>());
-        executor->connect(executor_config);
-
-        while (true) {
-            Task_Worker task = queue.pop();
-            if (task.command.op_type == "POISON_PILL") break;
-
-            std::this_thread::sleep_until(task.target_time);
-
-            ExecutionResult result = executor->execute(task.command);
-
-            if (result.success) {
-                success_count++;
-            } else {
-                error_count++;
-            }
-        }
-    } catch (const std::exception &e) {
-        std::cerr << "Error in Thread " << id << ": " << e.what() << std::endl;
-        error_count++;
-    }
-
-    if (executor) {
-        executor.reset();
-    }
-}
-
 int main() {
     YAML::Node config;
     try {
-        config = YAML::LoadFile("../../config.yaml");
+        config = YAML::LoadFile("config.yaml");
     } catch (const std::exception& e) {
         std::cerr << "Error loading config.yaml: " << e.what() << std::endl;
         return 1;
@@ -88,7 +26,7 @@ int main() {
 
     const std::string input_log_path = pipeline_config["generator_log_file"].as<std::string>();
 
-    std::ifstream input_log_file("../../" + input_log_path);
+    std::ifstream input_log_file(input_log_path);
     if (!input_log_file.is_open()) {
         std::cerr << "Error: Could not open synthetic log file: " << input_log_path << std::endl;
         return 1;
@@ -121,52 +59,48 @@ int main() {
     double trace_start_timestamp = all_tasks[0].original_timestamp;
 
     const int num_workers = executor_config["max_workers"].as<int>();
+	ThreadPool pool(num_workers, executor_config);
 
-    std::vector<ThreadSafeQueue<Task_Worker>> queues(num_workers);
-    std::vector<std::thread> workers;
-    std::atomic<long long> success_count(0);
-    std::atomic<long long> error_count(0);
+	std::vector<Task_Worker> benchmark_set;
 
-    for (int i = 0; i < num_workers; ++i) {
-        workers.emplace_back(
-            worker_function, i, std::cref(executor_config),
-            std::ref(queues[i]), std::ref(success_count), std::ref(error_count)
-        );
-    }
-
-    std::cout << "Starting execution in 1 second (allowing threads to connect)..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    std::cout << "Dispatching events to worker queues..." << std::endl;
     auto benchmark_start = std::chrono::steady_clock::now();
-    int worker_idx = 0;
 
     for (const auto& parsed_task : all_tasks) {
         long long relative_ns = static_cast<long long>((parsed_task.original_timestamp - trace_start_timestamp) * 1e9);
         auto target_time = benchmark_start + std::chrono::nanoseconds(relative_ns);
 
         Task_Worker worker_task = {target_time, parsed_task.command};
-        queues[worker_idx % num_workers].push(worker_task);
-        worker_idx++;
+		benchmark_set.push_back(worker_task);
     }
+
+	// Force order
+	std::sort(benchmark_set.begin(), benchmark_set.end(), [](const Task_Worker& a, const Task_Worker& b){
+		return a.target_time < b.target_time;
+	});
+
+	std::cout << "Firing benchmark timeline into the pool..." << std::endl;
+
+	for (auto& task : benchmark_set)
+		pool.enqueue_task(std::move(task));
 
     std::cout << "Dispatching complete. Waiting for workers to finish execution..." << std::endl;
 
-    for (int i = 0; i < num_workers; ++i) {
-        queues[i].push({{}, {"POISON_PILL", "", ""}});
-    }
+	long long expected_total = benchmark_set.size();
+	while (!pool.is_work_complete() || (pool.success_count + pool.error_count) < expected_total) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
 
-    for (auto& worker : workers) {
-        worker.join();
-    }
-
+	long long success_count = pool.success_count;
+	long long error_count = pool.error_count;
     long long total_executed = success_count + error_count;
+	long long avg_latency = success_count > 0 ? pool.total_latency_ns.load() / success_count : 0;
     std::cout << "\n--- EXECUTION SUMMARY ---" << std::endl;
     std::cout << "Total Operations Attempted: " << total_executed << std::endl;
     std::cout << "Successful Operations:      " << success_count << std::endl;
     std::cout << "Failed Operations:          " << error_count << std::endl;
+	std::cout << "Average Latency (ns):       " << avg_latency << std::endl;
     if (total_executed > 0) {
-        double success_rate = (static_cast<double>(success_count) / total_executed) * 100.0;
+        double success_rate = (static_cast<double>(pool.success_count) / total_executed) * 100.0;
         printf("Success Rate:               %.2f%%\n", success_rate);
     }
     std::cout << "-------------------------\n" << std::endl;

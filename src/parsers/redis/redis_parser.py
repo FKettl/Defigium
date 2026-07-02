@@ -119,7 +119,7 @@ class RedisParser(IParser):
         elif op_type == "ZADD":
             if not available_pool:
                 return []
-            member = random.choice(available_pool)
+            member = random.choice(list(available_pool))
             score = f"{random.uniform(-1e9, 1e9):.8E}"
             return [score, member]
         return []
